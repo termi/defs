@@ -195,7 +195,12 @@ Scope.prototype.hasFunctionScopeBetween = function(outer) {
 
 Scope.prototype.lookup = function(name) {
     for (let scope = this; scope; scope = scope.parent) {
-        if (scope.decls.has(name)) {
+        if (scope.decls.has(name)
+            || scope.node
+                && isFunction(scope.node)
+                && scope.node.rest
+                && scope.node.rest.name == name
+        ) {
             return scope;
         } else if (scope.kind === "hoist") {
             scope.propagates.add(name);

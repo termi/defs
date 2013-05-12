@@ -244,7 +244,7 @@ function setupReferences(ast, allIdentifiers) {
 // TODO for loops init and body props are parallel to each other but init scope is outer that of body
 // TODO is this a problem?
 
-function varify(ast, stats, allIdentifiers) {
+function varify(ast, stats, allIdentifiers, src) {
     const changes = [];
 
     function unique(name) {
@@ -257,6 +257,74 @@ function varify(ast, stats, allIdentifiers) {
         }
     }
     
+    function functionDefaultsAndRest(node) {
+        if (node.type === "FunctionDeclaration") {
+            const defaults = node.defaults;
+            const params = node.params;
+            const fnBody = node.body.body[0];
+            const postFix = "" + src.substring(node.body.range[0] + 1, fnBody.range[0]);
+
+            if (defaults.length) {
+                for(var i = 0, l = defaults.length ; i < l ; i++) {
+                    const paramIndex = params.length - l + i;
+                    const param = params[paramIndex];
+                    const prevDflt = defaults[i - 1];
+                    const prevParam = params[paramIndex - 1];
+                    const dflt = defaults[i];
+
+                    if (dflt.type === "Identifier" && dflt.name === param.name) {
+                        error(getline(node), "function parameter '{0}' defined with default value refered to scope variable with the same name '{0}'", param.name);
+                    }
+
+                    const defaultStr =
+                        "var " + param.name + " = arguments[" + paramIndex + "];if(" + param.name + " === void 0)" + param.name + " = " + src.substring(dflt.range[0], dflt.range[1]) + ";" + postFix;
+
+                    // add default set
+                    changes.push({
+                        start: fnBody.range[0],
+                        end: fnBody.range[0],
+                        str: defaultStr,
+                        type: 2
+                    });
+
+                    // cleanup default definition
+                    // text change 'param = value' => ''
+                    changes.push({
+                        start: ((prevDflt || prevParam) ? ((prevDflt || prevParam).range[1] + 1) : param.range[0]) - (prevParam ? 1 : 0),
+                        end: dflt.range[1],
+                        str: "",
+                        type: 1
+                    });
+                }
+            }
+
+            const rest = node.rest;
+            const lastParam = params[params.length - 1];
+            const lastDflt = defaults[defaults.length - 1];
+            if (rest) {
+                const restStr = "var " + rest.name + " = [].slice.call(arguments, " + params.length + ");" + postFix;
+                const hoistScope = node.$scope.closestHoistScope();
+
+                hoistScope.add(rest.name, "var", rest, -1);
+
+                // add rest
+                changes.push({
+                    start: fnBody.range[0],
+                    end: fnBody.range[0],
+                    str: restStr,
+                });
+
+                // cleanup rest definition
+                changes.push({
+                    start: ((lastDflt || lastParam) ? ((lastDflt || lastParam).range[1] + 1) : rest.range[0]) - (lastParam ? 1 : 3),
+                    end: rest.range[1],
+                    str: "",
+                        type: 2
+                });
+            }
+        }
+    }
+
     function renameDeclarations(node) {
         if (node.type === "VariableDeclaration" && isConstLet(node.kind)) {
             const hoistScope = node.$scope.closestHoistScope();
@@ -386,6 +454,7 @@ function varify(ast, stats, allIdentifiers) {
 
     traverse(ast, {pre: renameDeclarations});
     traverse(ast, {pre: renameReferences});
+    traverse(ast, {pre: functionDefaultsAndRest});
     ast.$scope.traverse({pre: function(scope) {
         delete scope.moves;
     }});
@@ -533,7 +602,7 @@ function run(src, config) {
     // varify modifies the scopes and AST accordingly and
     // returns a list of change fragments (to use with alter)
     const stats = new Stats();
-    const changes = varify(ast, stats, allIdentifiers);
+    const changes = varify(ast, stats, allIdentifiers, src);
 
     if (error.any) {
         error.show();
