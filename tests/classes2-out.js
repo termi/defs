@@ -22,8 +22,9 @@ var Greeter = (function(_super){
 	}
 	Object.assign(Greeter, _super);Greeter.prototype = Object.create(_super.prototype);Greeter.prototype.constructor = Greeter;
 
-	Greeter.prototype.greet = function(a = [2]) {
-		var $D$1 = arguments[1];
+	Greeter.prototype.greet = function() {
+		var a = arguments[0];if(a === void 0)a = 1;
+		var $D$1 = arguments[1] !== void 0 ? arguments[1] : [2];
 		var b = $D$1[0];
 		$D$1 = null;
 		return _super.prototype.greet.call(this) + "Hello, " + this.msg	+ "|" + this.greeting + "|" + a + "|" + b;

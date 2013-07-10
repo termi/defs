@@ -1,3 +1,7 @@
+// http://traceur-compiler.googlecode.com/svn/trunk/presentation/index.html
+// https://github.com/jdiamond/harmonizr
+
+
 "use strict";
 
 const esprima = require("./esprima_harmony").parse;
@@ -86,9 +90,15 @@ function createScopes(node, parent) {
         node.$scope = new Scope({
             kind: "hoist",
             node: node,
-            parent: null,
+            parent: null
         });
 
+    /* Due classBodyReplace is separate process, we do not really need this check
+    } else if (node.type === "ClassDeclaration") {
+		assert(node.id.type === "Identifier");
+
+		node.$parent.$scope.add(node.id.name, "fun", node.id, null);
+	*/
     } else if (isFunction(node)) {
         // Function is a scope, with params in it
         // There's no block-scope under it
@@ -106,11 +116,22 @@ function createScopes(node, parent) {
         node.$scope = new Scope({
             kind: "hoist",
             node: node,
-            parent: node.$parent.$scope,
+            parent: node.$parent.$scope
         });
 
-        node.params.forEach(function(param) {
-            node.$scope.add(param.name, "param", param, null);
+        node.params.forEach(function addParamToScope(param) {
+			if( isObjectPattern(param) ) {
+				param.properties.forEach(addParamToScope);
+			}
+			else if( param.type === "Property" ) {
+				addParamToScope(param.value);
+			}
+			else if( isArrayPattern(param) ) {
+				param.elements.forEach(addParamToScope);
+			}
+			else {
+				node.$scope.add(param.name, "param", param, null);
+			}
         });
 
     } else if (node.type === "VariableDeclaration") {
@@ -131,7 +152,7 @@ function createScopes(node, parent) {
         node.$scope = new Scope({
             kind: "block",
             node: node,
-            parent: node.$parent.$scope,
+            parent: node.$parent.$scope
         });
 
     } else if (isNonFunctionBlock(node)) {
@@ -139,7 +160,7 @@ function createScopes(node, parent) {
         node.$scope = new Scope({
             kind: "block",
             node: node,
-            parent: node.$parent.$scope,
+            parent: node.$parent.$scope
         });
 
     } else if (node.type === "CatchClause") {
@@ -148,7 +169,7 @@ function createScopes(node, parent) {
         node.$scope = new Scope({
             kind: "catch-block",
             node: node,
-            parent: node.$parent.$scope,
+            parent: node.$parent.$scope
         });
         node.$scope.add(identifier.name, "caught", identifier, null);
 
@@ -180,13 +201,13 @@ function createTopScope(programScope, environments, globals) {
     const topScope = new Scope({
         kind: "hoist",
         node: {},
-        parent: null,
+        parent: null
     });
 
     const complementary = {
         undefined: false,
         Infinity: false,
-        console: false,
+        console: false
     };
 
     inject(complementary);
@@ -241,32 +262,324 @@ function setupReferences(ast, allIdentifiers) {
     traverse(ast, {pre: visit});
 }
 
+function PropertyToString(node) {
+	assert(node.type === "Literal" || node.type === "Identifier");
+
+	var result;
+	if( node.type === "Literal" ) {
+		result = "[" + node.raw + "]";
+	}
+	else {
+		result = "." + node.name;
+	}
+
+	return result
+}
+
+function replaceClasses(ast, src) {
+	const changes = [];
+	let currentClassName, currentClassMethodsStatic;
+
+	function unwrapSuperCall(node, calleeNode, isStatic, property, isConstructor) {
+		let changeStr = "_super" + (isStatic ? "" : ".prototype");
+		let callArguments = node.arguments;
+		let hasSpreadElement = !isStatic && callArguments.some(function(node){ return node.type === "SpreadElement" });
+
+		let changesEnd;
+		if( (!isStatic || isConstructor) && !hasSpreadElement ) {
+			changeStr += (property ? "." + property.name : "");
+
+			if( !callArguments.length ) {
+				changeStr += ".call(this)";
+				changesEnd = node.range[1];
+			}
+			else {
+				changeStr += ".call(this, ";
+				changesEnd = callArguments[0].range[0];
+			}
+		}
+		else {
+			changesEnd = calleeNode.range[1];
+		}
+
+		// text change 'super(<some>)' => '_super(<some>)' (if <some> contains SpreadElement) or '_super.call(this, <some>)'
+		changes.push({
+			start: calleeNode.range[0],
+			end: changesEnd,
+			str: changeStr
+		});
+	}
+
+	function replaceClassConstructorSuper(node) {
+		if( node.type === "CallExpression" ) {
+			let calleeNode = node.callee;
+
+			if( calleeNode && calleeNode.type === "Identifier" && calleeNode.name === "super" ) {
+				unwrapSuperCall(node, calleeNode, true, null, true);
+			}
+		}
+	}
+
+	function replaceClassMethods(node) {
+		if( node.type === "MethodDefinition" && node.key.name !== "constructor" ) {
+			currentClassMethodsStatic = node.static;
+			if( currentClassMethodsStatic === true ) {
+				// text change 'method(<something>)' => 'ClassName.method(<something>)'
+				changes.push({
+					start: node.range[0],
+					end: node.key.range[0],
+					str: currentClassName + "."
+				});
+			}
+			else {
+				// text change 'method(<something>)' => 'ClassName.prototype.method(<something>)'
+				changes.push({
+					start: node.range[0],
+					end: node.key.range[0],
+					str: currentClassName + ".prototype."
+				});
+			}
+
+			// text change 'method(<something>)' => 'method = function(<something>)'
+			changes.push({
+				start: node.key.range[1],
+				end: node.key.range[1],
+				str: " = function"
+			});
+
+			traverse(node.value, {pre: replaceClassMethodSuper})
+		}
+		currentClassMethodsStatic = null;
+	}
+	function replaceClassMethodSuper(node) {
+		if( node.type === "CallExpression" ) {
+			assert(typeof currentClassMethodsStatic === "boolean");
+
+			let calleeNode = node.callee;
+
+			if( calleeNode && calleeNode.type === "MemberExpression" ) {
+				let objectNode = calleeNode.object;
+				if( objectNode && objectNode.type === "Identifier" && objectNode.name === "super" ) {
+					// text change 'super.method(<some>)' => '_super(<some>)' (if <some> contains SpreadElement) or '_super.call(this, <some>)'
+					unwrapSuperCall(node, objectNode, currentClassMethodsStatic, calleeNode.property);
+				}
+			}
+		}
+	}
+
+	function replaceClassBody(node) {
+		if( node.type === "ClassDeclaration" ) {
+			let nodeId = node.id
+				, superClass = node.superClass
+				, classStr
+				, classBodyNodes = node.body.body
+				, classConstructor
+				, indent = classBodyNodes[0] ? src.substring(node.body.range[0] + 1, classBodyNodes[0].range[0]) : "\t"
+				, classBodyNodesCount = classBodyNodes.length
+				, extendedClassConstructorPostfix
+			;
+
+			assert(nodeId && nodeId.type === "Identifier");
+
+			currentClassName = nodeId.name;
+			classStr = "var " + currentClassName + " = (function(";
+
+			if( superClass ) {
+				classStr += "_super";
+				superClass = src.substring(superClass.range[0], superClass.range[1]);
+				extendedClassConstructorPostfix = indent +
+					"Object.assign(" + currentClassName + ", _super);" +
+						currentClassName + ".prototype = Object.create(_super.prototype);" +
+						currentClassName + ".prototype.constructor = " + currentClassName + ";"
+				;
+			}
+
+			classStr += ")";
+
+			// replace class definition
+			// text change 'class A[ extends B]' => ''
+			changes.push({
+				start: node.range[0],
+				end: node.body.range[0],
+				str: classStr
+			});
+
+			classStr = "";
+
+
+			for( let i = 0 ; i < classBodyNodesCount && !classConstructor ; i++ ) {
+				classConstructor = classBodyNodes[i];
+				if( classConstructor.type !== "MethodDefinition" ) {
+					classConstructor = null;
+				}
+				else if( classConstructor.key.name !== "constructor" ) {
+					classConstructor = null;
+				}
+			}
+
+			if( classConstructor ) {
+				classBodyNodesCount--;
+
+				changes.push({
+					start: classConstructor.key.range[0],
+					end: classConstructor.key.range[1],
+					str: "function " + currentClassName
+				});
+				if( extendedClassConstructorPostfix ) {
+					changes.push({
+						start: classConstructor.range[1],
+						end: classConstructor.range[1],
+						str: extendedClassConstructorPostfix
+					});
+				}
+				traverse(classConstructor, {pre: replaceClassConstructorSuper});
+			}
+			else {
+				changes.push({
+					start: node.body.range[0] + 1,
+					end: (classBodyNodesCount ? node.body.body[0].range[0] : node.body.range[1]) - 1,
+					str: indent + "function " + currentClassName + "() {" + (superClass ? "_super.apply(this, arguments)" : "") + "}" + (extendedClassConstructorPostfix || "") + "\n"
+				});
+			}
+
+
+			if( classBodyNodesCount ) {
+				traverse(node.body, {pre: replaceClassMethods})
+			}
+
+
+			changes.push({
+				start: node.range[1] - 1,
+				end: node.range[1] - 1,
+				str: indent + "return " + currentClassName + ";\n"
+			});
+
+			changes.push({
+				start: node.range[1],
+				end: node.range[1],
+				str: ")(" + (superClass || "") + ");"
+			});
+
+			currentClassName = null;
+			return false;
+		}
+		currentClassName = null;
+	}
+
+	traverse(ast, {pre: replaceClassBody});
+
+	//console.log(changes)
+
+	return changes;
+}
+
 // TODO for loops init and body props are parallel to each other but init scope is outer that of body
 // TODO is this a problem?
 
 function varify(ast, stats, allIdentifiers, src) {
     const changes = [];
 
-    function unique(name) {
-        assert(allIdentifiers.has(name));
-        for (let cnt = 0; ; cnt++) {
-            const genName = name + "$" + String(cnt);
-            if (!allIdentifiers.has(genName)) {
+    function unique(name, newVariable, additionalFilter) {
+		assert(newVariable || allIdentifiers.has(name));
+
+        for( let cnt = 0 ; ; cnt++ ) {
+            const genName = name + "$" + cnt;
+            if( !allIdentifiers.has(genName) && (!additionalFilter || !additionalFilter.has(genName))) {
                 return genName;
             }
         }
     }
     
-    function functionDefaultsAndRest(node) {
-        if (node.type === "FunctionDeclaration") {
+    function functionDestructuringAndDefaultsAndRest(node) {
+        if ( isFunction(node) ) {
             const defaults = node.defaults;
             const params = node.params;
-            const fnBody = node.body.body[0];
-            const postFix = "" + src.substring(node.body.range[0] + 1, fnBody.range[0]);
+			let paramsCount = params.length;
+			const initialParamsCount = paramsCount;
+            const fnBodyRange = node.body.body.length ?
+				node.body.body[0].range
+				:
+				[//empty function body. example: function r(){}
+					node.body.range[0] + 1
+					, node.body.range[1] - 1
+				]
+			;
+            const indentStr = "" + src.substring(node.body.range[0] + 1, fnBodyRange[0]);
+			const defaultsCount = defaults.length;
+			const lastParam = params[paramsCount - 1];
+			const lastDflt = defaults[defaults.length - 1];
+			let hoistScope;
 
-            if (defaults.length) {
-                for(var i = 0, l = defaults.length ; i < l ; i++) {
-                    const paramIndex = params.length - l + i;
+			paramsCount -= defaultsCount;
+
+			if( paramsCount ) {
+				for(let i = 0 ; i < paramsCount ; i++) {
+					const param = params[i];
+					const prevParam = params[i - 1];
+
+					if( isObjectPattern(param) || isArrayPattern(param) ) {
+						let paramStr, newVariables = [], newDefinitions = [], postFix = "";
+						paramStr = "";//"\n" + indentStr;
+						unwrapDestructuring(param
+							, {type: "Identifier", name: "arguments[" + i + "]"}
+							, newVariables, newDefinitions);
+
+						hoistScope = node.$scope.closestHoistScope();
+						newVariables.forEach(function(newVariable, index){
+							hoistScope.add(newVariable.name, newVariable.kind, param);
+							allIdentifiers.add(newVariable.name);
+
+							paramStr += (
+								(index === 0 ? "var " : "")//always VAR !!! not a newVariable.type
+									+ newVariable.name
+									+ " = "
+									+ newVariable.value
+								);
+
+							if( newVariable.needsToCleanUp ) {
+								postFix += (newVariable.name + " = null;");
+							}
+						});
+						paramStr += (";" + indentStr);
+
+						newDefinitions.forEach(function(definition, index) {
+							var definitionId = definition.id;
+							assert(definitionId.type === "Identifier");
+
+							paramStr += (
+								(index === 0 ? "var " : ", ")//always VAR !!!
+									+ definitionId.name
+									+ " = "
+									+ definition["init"]["object"].name
+									+ PropertyToString(definition["init"]["property"])
+								)
+						});
+						paramStr += (";" + indentStr + postFix + indentStr);
+
+						param.$replaced = true;
+
+						// add default set
+						changes.push({
+							start: fnBodyRange[0],
+							end: fnBodyRange[0],
+							str: paramStr,
+							type: 2// ??
+						});
+
+						// cleanup default definition
+						// text change 'param = value' => ''
+						changes.push({
+							start: (prevParam ? prevParam.range[1] + 1 : param.range[0]) - (prevParam ? 1 : 0),
+							end: param.range[1],
+							str: ""
+						});
+					}
+				}
+			}
+
+            if( defaultsCount ) {
+                for(let i = 0 ; i < defaultsCount ; i++) {
+                    const paramIndex = initialParamsCount - defaultsCount + i;
                     const param = params[paramIndex];
                     const prevDflt = defaults[i - 1];
                     const prevParam = params[paramIndex - 1];
@@ -276,15 +589,62 @@ function varify(ast, stats, allIdentifiers, src) {
                         error(getline(node), "function parameter '{0}' defined with default value refered to scope variable with the same name '{0}'", param.name);
                     }
 
-                    const defaultStr =
-                        "var " + param.name + " = arguments[" + paramIndex + "];if(" + param.name + " === void 0)" + param.name + " = " + src.substring(dflt.range[0], dflt.range[1]) + ";" + postFix;
+                    let defaultStr;
+					if( isObjectPattern(param) || isArrayPattern(param) ) {
+						//dflt.$type = dflt.type;
+						//dflt.type = "";//TODO:: check it
+
+						let newVariables = [], newDefinitions = [], postFix = "";
+						defaultStr = "";
+						unwrapDestructuring(param
+							, {type: "Identifier", name: "arguments[" + paramIndex + "] !== void 0 ? arguments[" + paramIndex + "] : " + src.substring(dflt.range[0], dflt.range[1])}
+							, newVariables, newDefinitions);
+
+						hoistScope = node.$scope.closestHoistScope();
+						newVariables.forEach(function(newVariable, index){
+							hoistScope.add(newVariable.name, newVariable.kind, dflt);
+							allIdentifiers.add(newVariable.name);
+
+							defaultStr += (
+								(index === 0 ? "var " : ", ")//always VAR !!! not a newVariable.type
+									+ newVariable.name
+									+ " = "
+									+ newVariable.value
+							);
+
+							if( newVariable.needsToCleanUp ) {
+								postFix += (newVariable.name + " = null;");
+							}
+						});
+						defaultStr += (";" + indentStr);
+
+						newDefinitions.forEach(function(definition, index) {
+							var definitionId = definition.id;
+							//if(definitionId.type !== "Identifier")console.log(definitionId.properties)
+							assert(definitionId.type === "Identifier");
+
+							defaultStr += (
+								(index === 0 ? "var " : ", ")//always VAR !!!
+									+ definitionId.name
+									+ " = "
+									+ definition["init"]["object"].name
+									+ PropertyToString(definition["init"]["property"])
+							)
+						});
+						defaultStr += (";" + indentStr + postFix + indentStr);
+					}
+                    else {
+						defaultStr = "var " + param.name + " = arguments[" + paramIndex + "];if(" + param.name + " === void 0)" + param.name + " = " + src.substring(dflt.range[0], dflt.range[1]) + ";" + indentStr;
+					}
+
+					param.$replaced = true;
 
                     // add default set
                     changes.push({
-                        start: fnBody.range[0],
-                        end: fnBody.range[0],
+                        start: fnBodyRange[0],
+                        end: fnBodyRange[0],
                         str: defaultStr,
-                        type: 2
+                        type: 2// ??
                     });
 
                     // cleanup default definition
@@ -292,41 +652,106 @@ function varify(ast, stats, allIdentifiers, src) {
                     changes.push({
                         start: ((prevDflt || prevParam) ? ((prevDflt || prevParam).range[1] + 1) : param.range[0]) - (prevParam ? 1 : 0),
                         end: dflt.range[1],
-                        str: "",
-                        type: 1
+                        str: ""
                     });
                 }
             }
 
             const rest = node.rest;
-            const lastParam = params[params.length - 1];
-            const lastDflt = defaults[defaults.length - 1];
-            if (rest) {
-                const restStr = "var " + rest.name + " = [].slice.call(arguments, " + params.length + ");" + postFix;
-                const hoistScope = node.$scope.closestHoistScope();
+            if( rest ) {
+                const restStr = "var " + rest.name + " = [].slice.call(arguments, " + initialParamsCount + ");" + indentStr;
+				if( !hoistScope ) {
+					hoistScope = node.$scope.closestHoistScope();
+				}
 
                 hoistScope.add(rest.name, "var", rest, -1);
 
                 // add rest
                 changes.push({
-                    start: fnBody.range[0],
-                    end: fnBody.range[0],
-                    str: restStr,
+                    start: fnBodyRange[0],
+                    end: fnBodyRange[0],
+                    str: restStr
                 });
 
                 // cleanup rest definition
                 changes.push({
                     start: ((lastDflt || lastParam) ? ((lastDflt || lastParam).range[1] + 1) : rest.range[0]) - (lastParam ? 1 : 3),
                     end: rest.range[1],
-                    str: "",
-                        type: 2
+                    str: ""
                 });
             }
         }
     }
 
+	function replaceDestructuringVariableDeclaration(node) {
+		if( node.type === "VariableDeclaration" && isVarConstLet(node.kind) ) {
+			let declarations = node.declarations;
+
+			let afterVariableDeclaration = "";
+
+			declarations.forEach(function renameDeclaration(declarator, declaratorIndex) {
+				var declaratorId = declarator.id;
+
+				if( isObjectPattern(declaratorId) || isArrayPattern(declaratorId) ) {
+					let declaratorInit = declarator.init;
+					assert(typeof declaratorInit === "object");
+
+					let newVariables = [], newDefinitions = [], declarationString = "";
+
+					unwrapDestructuring(declaratorId, declaratorInit, newVariables, newDefinitions);
+
+					let hoistScope = node.$scope.closestHoistScope();
+					newVariables.forEach(function(newVariable, index){
+						hoistScope.add(newVariable.name, newVariable.kind, declaratorInit);
+						allIdentifiers.add(newVariable.name);
+
+						declarationString += (
+							(declaratorIndex === 0 && index === 0 ? "" : ", ")
+								+ newVariable.name
+								+ " = "
+								+ newVariable.value
+							);
+
+						if( newVariable.needsToCleanUp ) {
+							afterVariableDeclaration += (newVariable.name + " = null;");
+						}
+					});
+
+					newDefinitions.forEach(function(definition, index) {
+						assert(definition.type === "VariableDeclarator");
+						var definitionId = definition.id;
+
+						declarationString += (
+							(declaratorIndex === 0 && index === 0 && newVariables.length === 0 ? "" : ", ")
+								+ definitionId.name
+								+ " = "
+								+ definition["init"]["object"].name
+								+ PropertyToString(definition["init"]["property"])
+							)
+					});
+
+					// replace destructuring with simple variable declaration
+					changes.push({
+						start: declarator.range[0],
+						end: declarator.range[1],
+						str: declarationString
+					});
+				}
+			});
+
+			if( afterVariableDeclaration ) {
+				// add temporary variables cleanup
+				changes.push({
+					start: node.range[1],
+					end: node.range[1],
+					str: afterVariableDeclaration
+				});
+			}
+		}
+	}
+
     function renameDeclarations(node) {
-        if (node.type === "VariableDeclaration" && isConstLet(node.kind)) {
+        if( node.type === "VariableDeclaration" && isConstLet(node.kind) ) {
             const hoistScope = node.$scope.closestHoistScope();
             const origScope = node.$scope;
 
@@ -334,60 +759,73 @@ function varify(ast, stats, allIdentifiers, src) {
             changes.push({
                 start: node.range[0],
                 end: node.range[0] + node.kind.length,
-                str: "var",
+                str: "var"
             });
 
-            let declarations = node.declarations.slice();
-            for (let i = 0 ; i < declarations.length ; i++) {
-                let decl = declarations[i];
-                if (isObjectPattern(decl.id)) {
-                    declarations.splice(i, 1);
+            let declarations = node.declarations;
 
-                    const id = decl.id;
-                    for (let properties = id.properties, k = 0, l = properties.length ; k < l ; k++) {
-                        const property = properties[k];
-                        if (property) {
-                            declarations.splice(i, 0, {
-                                id: property,
-                                type: decl.type,
-                                range: property.range,
-                                loc: property.loc,
-                                $type: "ObjectPattern"
-                            });
-                        }
-                    }
+            declarations.forEach(function renameDeclaration(declarator) {
+				var declaratorId =
+					isObjectPattern(declarator) || isArrayPattern(declarator) ? declarator :
+					declarator.type === "Property" ? declarator.value :
+					declarator.id
+				;
+
+				//console.log(declarator.type, declarator.$parent.$type)
+                assert(
+					declarator.type === "VariableDeclarator" || declarator.$type === "VariableDeclarator"
+					/*|| (
+						( isObjectPattern(declarator.id) || isArrayPattern(declarator.id) )
+						&& ( declarator.$parent.type === "VariableDeclarator" || declarator.$parent.$type === "VariableDeclarator" )
+					)*/
+				);
+
+				if( isObjectPattern(declaratorId) ) {
+					for (let properties = declaratorId.properties, k = 0, l = properties.length ; k < l ; k++) {
+						const property = properties[k];
+						if (property) {
+							//property.id = property;//TODO:: check if it really necessary
+							property.$type = "VariableDeclarator";
+							property.$parentType = "ObjectPattern";
+							renameDeclaration(property);
+						}
+					}
+					return;
+				}
+				else if (isArrayPattern(declaratorId)) {
+					for (let elements = declaratorId.elements, k = 0, l = elements.length ; k < l ; k++) {
+						const element = elements[k];
+						if (element) {
+							//element.id = element;//TODO:: check if it really necessary
+							element.$type = "VariableDeclarator";
+							element.$parentType = "ArrayPattern";
+							renameDeclaration(element);
+						}
+					}
+					return;
+				}
+
+                let name, prefix = "", needSrcChanges = true;
+
+                if (declarator.$parentType === "ObjectPattern") {
+					declaratorId = declarator;
+					name = declarator.value.name;
+                    prefix = declarator.key.name + " :";
+
+					needSrcChanges = false;//src text-replace in replaceDestructuringVariableDeclaration function
                 }
-                else if (isArrayPattern(decl.id)) {
-                    declarations.splice(i, 1);
+				else if (declarator.$parentType === "ArrayPattern") {
+					declaratorId = declarator;
+					name = declarator.name;
 
-                    const id = decl.id;
-                    for (let elements = id.elements, k = 0, l = elements.length ; k < l ; k++) {
-                        const element = elements[k];
-                        if (element) {
-                            declarations.splice(i, 0, {
-                                id: element,
-                                type: decl.type,
-                                range: element.range,
-                                loc: element.loc
-                            });
-                        }
-                    }
-                }
-            }
-
-            declarations.forEach(function(declarator) {
-                assert(declarator.type === "VariableDeclarator");
-
-                let name, prefix = "";
-                if (declarator.$type == "ObjectPattern") {
-                    name = declarator.id.value.name;
-                    prefix = declarator.id.key.name + " :";
-                }
+					needSrcChanges = false;//src text-replace in replaceDestructuringVariableDeclaration function
+				}
                 else {
-                    name = declarator.id.name;
+					declaratorId = declarator.id;
+                    name = declaratorId.name;
                 }
 
-                stats.declarator(node.kind);
+                stats.declarator(node.kind);//FIXME:: comment
 
                 // rename if
                 // 1) name already exists in hoistScope, or
@@ -398,12 +836,12 @@ function varify(ast, stats, allIdentifiers, src) {
                 const newName = (rename ? unique(name) : name);
 
                 origScope.remove(name);
-                hoistScope.add(newName, "var", declarator.id, declarator.range[1]);
+                hoistScope.add(newName, "var", declaratorId, declarator.range[1]);
 
                 origScope.moves = origScope.moves || stringmap();
                 origScope.moves.set(name, {
                     name: newName,
-                    scope: hoistScope,
+                    scope: hoistScope
                 });
 
                 allIdentifiers.add(newName);
@@ -411,16 +849,30 @@ function varify(ast, stats, allIdentifiers, src) {
                 if (newName !== name) {
                     stats.rename(name, newName, getline(declarator));
 
-                    declarator.id.originalName = name;
-                    declarator.id.name = newName;
+					declaratorId.originalName = name;//TODO:: in other parts of this file replace it to ObjectPattern/ArrayPattern check
 
-                    // textchange var x => var x$1
-                    changes.push({
-                        start: declarator.id.range[0],
-                        end: declarator.id.range[1],
-                        str: prefix + newName,
-                    });
+					if (declarator.$parentType === "ObjectPattern") {
+						declarator.value.name = newName;
+						declarator.originalName = name;
+					}
+					else if (declarator.$parentType === "ArrayPattern") {
+						declarator.name = newName;
+					}
+					else {
+						declaratorId.name = newName;
+					}
+
+					if( needSrcChanges ) {
+						// textchange var x => var x$1
+						changes.push({
+							start: declaratorId.range[0],
+							end: declaratorId.range[1],
+							str: prefix + newName
+						});
+					}
                 }
+
+				//node.kind = "var";
             });
         }
     }
@@ -436,9 +888,9 @@ function varify(ast, stats, allIdentifiers, src) {
         node.$refToScope = move.scope;
 
         if (node.name !== move.name
-            && !(//not a destructuring
-                isObjectPattern(node.$parent && node.$parent.$parent)
-                || isArrayPattern(node.$parent && node.$parent.$parent)
+            && (//not a destructuring
+                node.$parentType !== "ObjectPattern"
+                && node.$parentType !== "ArrayPattern"
             )
         ) {
             node.originalName = node.name;
@@ -447,14 +899,205 @@ function varify(ast, stats, allIdentifiers, src) {
             changes.push({
                 start: node.range[0],
                 end: node.range[1],
-                str: move.name,
+                str: move.name
             });
         }
     }
 
+    function replaceLoopClosuresPre(node) {
+        if (outermostLoop === null && isLoop(node)) {
+            outermostLoop = node;
+        }
+        if (!outermostLoop) {
+            // not inside loop
+            return;
+        }
+
+        // collect function-chain (as long as we're inside a loop)
+        if (isFunction(node)) {
+            functions.push(node);
+        }
+        if (functions.length === 0) {
+            // not inside function
+            return;
+        }
+
+        if (isReference(node) && isConstLet(node.$refToScope.getKind(node.name))) {
+            let n = node.$refToScope.node;
+
+            // node is an identifier
+            // scope refers to the scope where the variable is defined
+            // loop ..-> function ..-> node
+
+            let ok = true;
+            while (n) {
+//            n.print();
+//            console.log("--");
+                if (n === functions[functions.length - 1]) {
+                    // we're ok (function-local)
+                    break;
+                }
+                if (n === outermostLoop) {
+                    // not ok (between loop and function)
+                    ok = false;
+                    break;
+                }
+//            console.log("# " + scope.node.type);
+                n = n.$parent;
+//            console.log("# " + scope.node);
+            }
+            if (ok) {
+//            console.log("ok loop + closure: " + node.name);
+            } else {
+
+                changes.push({
+                    start: outermostLoop.body.range[0],
+                    end: outermostLoop.body.range[0],
+                    str: "(function(" + node.name + "){"
+                });
+
+                changes.push({
+                    start: outermostLoop.body.range[1],
+                    end: outermostLoop.body.range[1],
+                    str: "})(" + node.name + ")"
+                });
+            }
+
+
+            /*
+             walk the scopes, starting from innermostFunction, ending at outermostLoop
+             if the referenced scope is somewhere in-between, then we have an issue
+             if the referenced scope is inside innermostFunction, then no problem (function-local const|let)
+             if the referenced scope is outside outermostLoop, then no problem (const|let external to the loop)
+
+             */
+        }
+    }
+
+	function unwrapDestructuring(definitionNode, valueNode, newVariables, newDefinitions, temporaryVariables) {
+		assert(typeof valueNode === "object");
+		assert(isObjectPattern(definitionNode) || isArrayPattern(definitionNode));
+		assert(Array.isArray(newVariables));
+		assert(Array.isArray(newDefinitions));
+
+		if(!temporaryVariables)temporaryVariables = stringset();
+
+		let needsNewVariable = false, valueIdentifierName, valueIdentifierDefinition;
+		if( valueNode.type === "Identifier" ) {
+			valueIdentifierName = valueNode.name;
+
+			if( valueIdentifierName.indexOf("[") !== -1 || valueIdentifierName.indexOf(".") !== -1 ) {
+				needsNewVariable = true;
+				valueIdentifierDefinition = valueIdentifierName;
+			}
+		}
+		else {
+			needsNewVariable = true;
+			valueIdentifierDefinition = src.substring(valueNode.range[0], valueNode.range[1]);
+		}
+
+		if( needsNewVariable ) {
+			valueIdentifierName = unique("$D", true, temporaryVariables);
+
+			temporaryVariables.add(valueIdentifierName);
+
+			newVariables.push({
+				name: valueIdentifierName
+				, kind: "var"
+				, value: valueIdentifierDefinition
+				, needsToCleanUp: true
+			});
+		}
+
+		if( isObjectPattern(definitionNode) ) {
+			for (let properties = definitionNode.properties, k = 0, l = properties.length ; k < l ; k++) {
+				const property = properties[k];
+				if (property) {
+					//console.log("    property:: key = ", property.key.name, " / value = ", property.value.name, " | type =  ", definitionNode.$parent.type);
+
+					if( isObjectPattern(property.value) || isArrayPattern(property.value) ) {
+						unwrapDestructuring(property.value, {type: "Identifier", name: valueIdentifierName + PropertyToString(property.key)}, newVariables, newDefinitions, temporaryVariables);
+					}
+					else {
+						newDefinitions.push({
+							"type": "VariableDeclarator",
+							"id": property.value,
+							"init": {
+								"type": "MemberExpression",
+								"computed": false,
+								"object": {
+									"type": "Identifier",
+									"name": valueIdentifierName
+								},
+								"property": property.key
+							}
+						});
+					}
+				}
+			}
+		}
+		else {
+			for (let elements = definitionNode.elements, k = 0, l = elements.length ; k < l ; k++) {
+				const element = elements[k];
+				if (element) {
+					//console.log("    element = ", element.name, " | type =  ", definitionNode.$parent.type);
+
+					if( isObjectPattern(element) || isArrayPattern(element) ) {
+						unwrapDestructuring(element, {type: "Identifier", name: valueIdentifierName + "[" + k + "]"}, newVariables, newDefinitions, temporaryVariables);
+					}
+					else {
+						newDefinitions.push({
+							"type": "VariableDeclarator",
+							"id": element,
+							"init": {
+								"type": "MemberExpression",
+								"computed": true,
+								"object": {
+									"type": "Identifier",
+									"name": valueIdentifierName
+								},
+								"property": {
+									"type": "Literal",
+									"value": k,
+									"raw": k + ""
+								}
+							}
+						});
+					}
+				}
+			}
+		}
+	}
+
+    //traverse(ast, {pre: replaceLoopClosuresPre});//TODO::
     traverse(ast, {pre: renameDeclarations});
     traverse(ast, {pre: renameReferences});
-    traverse(ast, {pre: functionDefaultsAndRest});
+    traverse(ast, {pre: functionDestructuringAndDefaultsAndRest});
+	traverse(ast, {pre: replaceDestructuringVariableDeclaration});
+
+	/*traverse(ast, {pre: function (node) {
+		if( isObjectPattern(node) ) {
+			console.log("   ObjectPattern:");
+
+			for (let properties = node.properties, k = 0, l = properties.length ; k < l ; k++) {
+				const property = properties[k];
+				if (property) {
+					console.log("    property:: key = ", property.key.name, " / value = ", property.value.name, " | type =  ", node.$parent.type);
+				}
+			}
+		}
+		else if( isArrayPattern(node) ) {
+			console.log("   ArrayPattern:");
+
+			for (let elements = node.elements, k = 0, l = elements.length ; k < l ; k++) {
+				const element = elements[k];
+				if (element) {
+					console.log("    element = ", element.name, " | type =  ", node.$parent.type);
+				}
+			}
+		}
+	}});*/
+
     ast.$scope.traverse({pre: function(scope) {
         delete scope.moves;
     }});
@@ -561,10 +1204,44 @@ function run(src, config) {
         options[key] = config[key];
     }
 
-    const ast = esprima(src, {
-        loc: true,
-        range: true,
-    });
+	let ast;
+	let changes;
+
+
+	// First Step: Classes
+	ast = esprima(src, {
+		loc: true,
+		range: true
+	});
+
+	error.reset();
+
+	changes = replaceClasses(ast, src);
+
+	if (error.any) {
+		error.show();
+		return {
+			exitcode: -1
+		};
+	}
+	if (options.ast) {
+		throw new Error("Currently unsupported");
+	}
+	else if( changes.length ) {
+		src = alter(src, changes);
+	}
+	/*console.log(src)
+	return{
+		exitcode: -1
+	};*/
+
+	// Second Step: others
+	if( changes.length ) {// has changes in classes replacement Step
+		ast = esprima(src, {
+			loc: true,
+			range: true
+		});
+	}
 
     // TODO detect unused variables (never read)
     error.reset();
@@ -594,7 +1271,7 @@ function run(src, config) {
     if (error.any) {
         error.show();
         return {
-            exitcode: -1,
+            exitcode: -1
         };
     }
 
@@ -602,12 +1279,12 @@ function run(src, config) {
     // varify modifies the scopes and AST accordingly and
     // returns a list of change fragments (to use with alter)
     const stats = new Stats();
-    const changes = varify(ast, stats, allIdentifiers, src);
+    changes = varify(ast, stats, allIdentifiers, src);
 
     if (error.any) {
         error.show();
         return {
-            exitcode: -1,
+            exitcode: -1
         };
     }
 
@@ -618,15 +1295,23 @@ function run(src, config) {
         return {
             exitcode: 0,
             stats: stats,
-            ast: ast,
+            ast: ast
         };
     } else {
         // apply changes produced by varify and return the transformed src
+		/* TEST:
+		changes.push({
+		 start: 125,
+		 end: 130,
+		 str: "opt1$0__ololo"
+		})*/
+		//console.log(changes);var transformedSrc = "";try{ transformedSrc = alter(src, changes) } catch(e){ console.error(e+"") };
+
         const transformedSrc = alter(src, changes);
         return {
             exitcode: 0,
             stats: stats,
-            src: transformedSrc,
+            src: transformedSrc
         };
     }
 }
