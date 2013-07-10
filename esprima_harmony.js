@@ -188,8 +188,8 @@ parseYieldExpression: true
     };
 
     ClassPropertyType = {
-        static: 1,
-        prototype: 2
+        static: 'static',
+        prototype: 'prototype'
     };
 
     // Error messages should be identical to V8.
@@ -2294,7 +2294,7 @@ parseYieldExpression: true
         strict = previousStrict;
         state.yieldAllowed = previousYieldAllowed;
 
-        return delegate.createFunctionExpression(null, params, [], body, options.rest || null, options.generator, body.type !== Syntax.BlockStatement);
+        return delegate.createFunctionExpression(null, params, options.defaults, body, options.rest || null, options.generator, body.type !== Syntax.BlockStatement);
     }
 
 
@@ -2314,6 +2314,7 @@ parseYieldExpression: true
         method = parsePropertyFunction({
             params: tmp.params,
             rest: tmp.rest,
+			defaults: tmp.defaults,
             generator: options.generator
         });
 
@@ -3014,7 +3015,7 @@ parseYieldExpression: true
         strict = previousStrict;
         state.yieldAllowed = previousYieldAllowed;
 
-        return delegate.createArrowFunctionExpression(options.params, [], body, options.rest, body.type !== Syntax.BlockStatement);
+        return delegate.createArrowFunctionExpression(options.params, options.defaults, body, options.rest, body.type !== Syntax.BlockStatement);
     }
 
     function parseAssignmentExpression() {
@@ -4286,7 +4287,7 @@ parseYieldExpression: true
         strict = previousStrict;
         state.yieldAllowed = previousYieldAllowed;
 
-        return delegate.createFunctionExpression(id, tmp.params, [], body, tmp.rest, generator, expression);
+        return delegate.createFunctionExpression(id, tmp.params, tmp.defaults, body, tmp.rest, generator, expression);
     }
 
     function parseYieldExpression() {
@@ -4319,7 +4320,7 @@ parseYieldExpression: true
     function parseMethodDefinition(existingPropNames) {
         var token, key, param, propType, isValidDuplicateProp = false;
 
-        if (strict ? matchKeyword('static') : matchContextualKeyword('static')) {
+        if (lookahead.value === 'static') {
             propType = ClassPropertyType.static;
             lex();
         } else {
@@ -4874,67 +4875,77 @@ parseYieldExpression: true
         extra.tokens = tokens;
     }
 
-    function createLocationMarker() {
-        var marker = {};
+	function LocationMarker() {
+		this.range = [index, index];
+		this.loc = {
+			start: {
+				line: lineNumber,
+				column: index - lineStart
+			},
+			end: {
+				line: lineNumber,
+				column: index - lineStart
+			}
+		};
+	}
 
-        marker.range = [index, index];
-        marker.loc = {
-            start: {
-                line: lineNumber,
-                column: index - lineStart
-            },
-            end: {
-                line: lineNumber,
-                column: index - lineStart
-            }
-        };
+	LocationMarker.prototype = {
+		constructor: LocationMarker,
 
-        marker.end = function () {
-            this.range[1] = index;
-            this.loc.end.line = lineNumber;
-            this.loc.end.column = index - lineStart;
-        };
+		end: function () {
+			this.range[1] = index;
+			this.loc.end.line = lineNumber;
+			this.loc.end.column = index - lineStart;
+		},
 
-        marker.applyGroup = function (node) {
-            if (extra.range) {
-                node.groupRange = [this.range[0], this.range[1]];
-            }
-            if (extra.loc) {
-                node.groupLoc = {
-                    start: {
-                        line: this.loc.start.line,
-                        column: this.loc.start.column
-                    },
-                    end: {
-                        line: this.loc.end.line,
-                        column: this.loc.end.column
-                    }
-                };
-                node = delegate.postProcess(node);
-            }
-        };
+		applyGroup: function (node) {
+			if (extra.range) {
+				node.groupRange = [this.range[0], this.range[1]];
+			}
+			if (extra.loc) {
+				node.groupLoc = {
+					start: {
+						line: this.loc.start.line,
+						column: this.loc.start.column
+					},
+					end: {
+						line: this.loc.end.line,
+						column: this.loc.end.column
+					}
+				};
+				node = delegate.postProcess(node);
+			}
+		},
 
-        marker.apply = function (node) {
-            if (extra.range) {
-                node.range = [this.range[0], this.range[1]];
-            }
-            if (extra.loc) {
-                node.loc = {
-                    start: {
-                        line: this.loc.start.line,
-                        column: this.loc.start.column
-                    },
-                    end: {
-                        line: this.loc.end.line,
-                        column: this.loc.end.column
-                    }
-                };
-                node = delegate.postProcess(node);
-            }
-        };
+		apply: function (node) {
+			var nodeType = typeof node;
+			if(nodeType !== "object")console.log(node)
+			assert(nodeType === "object",
+				"Applying location marker to an unexpected node type: " +
+					nodeType);
 
-        return marker;
-    }
+			if (extra.range) {
+				node.range = [this.range[0], this.range[1]];
+			}
+			if (extra.loc) {
+				node.loc = {
+					start: {
+						line: this.loc.start.line,
+						column: this.loc.start.column
+					},
+					end: {
+						line: this.loc.end.line,
+						column: this.loc.end.column
+					}
+				};
+				node = delegate.postProcess(node);
+			}
+		}
+	};
+
+	function createLocationMarker() {
+		return new LocationMarker();
+	}
 
     function trackGroupExpression() {
         var marker, expr;
@@ -5132,6 +5143,7 @@ parseYieldExpression: true
 
             wrapTracking = wrapTrackingFunction(extra.range, extra.loc);
 
+			extra.parseArrayInitialiser = parseArrayInitialiser;
             extra.parseAssignmentExpression = parseAssignmentExpression;
             extra.parseBinaryExpression = parseBinaryExpression;
             extra.parseBlock = parseBlock;
@@ -5147,7 +5159,7 @@ parseYieldExpression: true
             extra.parseForVariableDeclaration = parseForVariableDeclaration;
             extra.parseFunctionDeclaration = parseFunctionDeclaration;
             extra.parseFunctionExpression = parseFunctionExpression;
-            extra.parseParam = parseParam;
+			extra.parseParams = parseParams;
             extra.parseGlob = parseGlob;
             extra.parseImportDeclaration = parseImportDeclaration;
             extra.parseImportSpecifier = parseImportSpecifier;
@@ -5155,9 +5167,9 @@ parseYieldExpression: true
             extra.parseModuleBlock = parseModuleBlock;
             extra.parseNewExpression = parseNewExpression;
             extra.parseNonComputedProperty = parseNonComputedProperty;
+			extra.parseObjectInitialiser = parseObjectInitialiser;
             extra.parseObjectProperty = parseObjectProperty;
             extra.parseObjectPropertyKey = parseObjectPropertyKey;
-            extra.parseParam = parseParam;
             extra.parsePath = parsePath;
             extra.parsePostfixExpression = parsePostfixExpression;
             extra.parsePrimaryExpression = parsePrimaryExpression;
@@ -5176,6 +5188,7 @@ parseYieldExpression: true
             extra.parseClassExpression = parseClassExpression;
             extra.parseClassBody = parseClassBody;
 
+			parseArrayInitialiser = wrapTracking(extra.parseArrayInitialiser);
             parseAssignmentExpression = wrapTracking(extra.parseAssignmentExpression);
             parseBinaryExpression = wrapTracking(extra.parseBinaryExpression);
             parseBlock = wrapTracking(extra.parseBlock);
@@ -5191,7 +5204,7 @@ parseYieldExpression: true
             parseForVariableDeclaration = wrapTracking(extra.parseForVariableDeclaration);
             parseFunctionDeclaration = wrapTracking(extra.parseFunctionDeclaration);
             parseFunctionExpression = wrapTracking(extra.parseFunctionExpression);
-            parseParam = wrapTracking(extra.parseParam);
+			parseParams = wrapTracking(extra.parseParams);
             parseGlob = wrapTracking(extra.parseGlob);
             parseImportDeclaration = wrapTracking(extra.parseImportDeclaration);
             parseImportSpecifier = wrapTracking(extra.parseImportSpecifier);
@@ -5200,9 +5213,9 @@ parseYieldExpression: true
             parseLeftHandSideExpression = wrapTracking(parseLeftHandSideExpression);
             parseNewExpression = wrapTracking(extra.parseNewExpression);
             parseNonComputedProperty = wrapTracking(extra.parseNonComputedProperty);
+			parseObjectInitialiser = wrapTracking(extra.parseObjectInitialiser);
             parseObjectProperty = wrapTracking(extra.parseObjectProperty);
             parseObjectPropertyKey = wrapTracking(extra.parseObjectPropertyKey);
-            parseParam = wrapTracking(extra.parseParam);
             parsePath = wrapTracking(extra.parsePath);
             parsePostfixExpression = wrapTracking(extra.parsePostfixExpression);
             parsePrimaryExpression = wrapTracking(extra.parsePrimaryExpression);
@@ -5237,6 +5250,7 @@ parseYieldExpression: true
         }
 
         if (extra.range || extra.loc) {
+			parseArrayInitialiser = extra.parseArrayInitialiser;
             parseAssignmentExpression = extra.parseAssignmentExpression;
             parseBinaryExpression = extra.parseBinaryExpression;
             parseBlock = extra.parseBlock;
@@ -5252,7 +5266,7 @@ parseYieldExpression: true
             parseForVariableDeclaration = extra.parseForVariableDeclaration;
             parseFunctionDeclaration = extra.parseFunctionDeclaration;
             parseFunctionExpression = extra.parseFunctionExpression;
-            parseParam = extra.parseParam;
+			parseParams = extra.parseParams;
             parseGlob = extra.parseGlob;
             parseImportDeclaration = extra.parseImportDeclaration;
             parseImportSpecifier = extra.parseImportSpecifier;
@@ -5263,6 +5277,7 @@ parseYieldExpression: true
             parseModuleBlock = extra.parseModuleBlock;
             parseNewExpression = extra.parseNewExpression;
             parseNonComputedProperty = extra.parseNonComputedProperty;
+			parseObjectInitialiser = extra.parseObjectInitialiser;
             parseObjectProperty = extra.parseObjectProperty;
             parseObjectPropertyKey = extra.parseObjectPropertyKey;
             parsePath = extra.parsePath;
