@@ -17,7 +17,7 @@ function test3(...rest = 1) {
 	console.log(rest);
 }
 test3();//line 16: rest parameter 'rest' may not have a default
-
+/*
 function test3(a,  = 2) {
 	console.log(a);
 }

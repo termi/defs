@@ -1,4 +1,3 @@
-"use strict";
 const fs = require("fs");
 const fmt = require("simple-fmt");
 //const path = require("path");
@@ -9,8 +8,11 @@ const commandVariables = {};
 process.argv.forEach(function(arg, index, array) {
 	var nextArg;
 	if( arg.indexOf("--") === 0 ) {
-		if( nextArg = array[index + 1] ) {
+		if( (nextArg = array[index + 1]) && nextArg.indexOf("--") !== 0 ) {
 			this[arg.substring(2)] = nextArg.indexOf("--") === 0 ? true : nextArg;
+		}
+		else {
+			this[arg.substring(2)] = true;
 		}
 	}
 }, commandVariables);
@@ -22,10 +24,10 @@ function slurp(filename) {
 
 const pathToTests = (fs.existsSync("tests") ? "tests" : "../../tests");
 
-const isHarmonyMode = process.argv[2] === "es6";
+const isHarmonyMode = commandVariables.es6;
 const NODE = process.argv[0];
-const NODE_FLAG = (process.argv[2] === "es5" ? "" : "--harmony");
-const DEFS_FLAG = (isHarmonyMode ? "--harmony" : "");
+const NODE_FLAG = (commandVariables.es5 ? "" : "--harmony");
+const DEFS_FLAG = (isHarmonyMode ? "--es6" : "");
 
 var tests;
 if( commandVariables.file && typeof commandVariables.file === "string" ) {
@@ -60,7 +62,7 @@ function stringCompare(str1, str2, compareType, removeLines) {
 
 	const compareFunction = compareType === "lines" ? ansidiff.lines : ansidiff.chars;
 
-	let equal = true
+	var equal = true
 		, lastDiffIndex = null
 		, result = compareFunction.call(ansidiff, str1, str2, function(obj, i, array) {
 			if( obj.added || obj.removed ) {
@@ -93,7 +95,7 @@ function run() {
 
 
     const noSuffix = test.slice(0, -3);
-    exec(fmt("{0} {1} defs-wrapper {2}/{3} {4}", NODE, NODE_FLAG, pathToTests, test, DEFS_FLAG), function(error, stdout, stderr) {
+    exec(fmt("{0} {1} defs-wrapper {2} {3}/{4}", NODE, NODE_FLAG, DEFS_FLAG, pathToTests, test), function(error, stdout, stderr) {
         stderr = (stderr || "").trim();
         stdout = (stdout || "").trim();
         const expectedStderr = slurp(fmt("{0}/{1}-stderr", pathToTests, noSuffix));
@@ -102,18 +104,23 @@ function run() {
 		const compare1 = stringCompare(expectedStderr, stderr, "lines");
 		const compare2 = stringCompare(expectedStdout, stdout, "lines", true);
 
-        if (compare1 !== true) {
-            fail("stderr", compare1);
-			//console.log(stderr);//, "+|+", stdout, "|error|", error);
-        }
-        if (compare2 !== true) {
-            fail("stdout", compare2);
-			//console.log(stdout);//, "+|+", stderr, "|error|", error);
-        }
+		if (compare1 !== true && compare2 !== true) {
+			fail("stdout/stderr", compare1, compare2);
+		}
+		else {
+			if (compare1 !== true) {
+				fail("stderr", compare1);
+				//console.log(stderr);//, "+|+", stdout, "|error|", error);
+			}
+			if (compare2 !== true) {
+				fail("stdout", compare2);
+				//console.log(stdout);//, "+|+", stderr, "|error|", error);
+			}
+		}
 
-		function fail(type, diff) {
+		function fail(type, diff1, diff2) {
 			console.log(fmt("FAILED test {0} TYPE {1}", test, type));
-			console.log(diff);
+			console.log(diff1, "\n", diff2 || "");
 			console.log("\n---------------------------\n");
 		}
         

@@ -6,7 +6,7 @@
 
 //const esprima = require("./esprima_harmony").parse;
 const esprima = require(
-		process.argv.some(function(arg){ return arg === "--harmony" })
+		process.argv.some(function(arg){ return arg === "--es6" })
 		? "./esprima_harmony" // Local copy of esprima harmony branch // FIXME
 		: "esprima"
 	).parse;
@@ -1274,7 +1274,7 @@ function run(src, config) {
 
     //ast.$scope.print(); process.exit(-1);
 
-    if (error.errors.length >= 1) {
+    if (error.errors.length) {
         return {
             exitcode: -1,
             errors: error.errors
@@ -1287,10 +1287,10 @@ function run(src, config) {
     const stats = new Stats();
     changes = varify(ast, stats, allIdentifiers, src);
 
-    if (error.any) {
-        error.show();
+    if (error.errors.length) {
         return {
-            exitcode: -1
+            exitcode: -1,
+			errors: error.errors
         };
     }
 

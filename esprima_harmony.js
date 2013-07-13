@@ -4126,19 +4126,20 @@ parseYieldExpression: true
         }
 		else {
             param = parseVariableIdentifier();
-			
+
 			if( hasDefaults && !match('=') && !rest ) {
 				throwErrorTolerant({}, Messages.ParameterAfterDefaultParameter, param.name);
 			}
-			
+
             validateParam(options, token, token.value);
         }
 
         if (rest) {
 			if (match('=')) {
 				throwErrorTolerant({}, Messages.RestParameterWithDefaultValue, param.name);
+                parseParamDefault(options);
 			}
-            if (!match(')')) {
+            else if (!match(')')) {
                 throwError({}, Messages.ParameterAfterRestParameter);
             }
             options.rest = param;
@@ -4148,7 +4149,7 @@ parseYieldExpression: true
 		options.params.push(param);
         return !match(')');
     }
-	
+
 	function parseParamDefault(options) {
 		if (match('=')) {
 			lex();
