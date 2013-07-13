@@ -1,7 +1,7 @@
 "use strict";
 const fs = require("fs");
 const fmt = require("simple-fmt");
-const path = require("path");
+//const path = require("path");
 const exec = require("child_process").exec;
 const ansidiff = require("ansidiff");
 
@@ -20,8 +20,14 @@ function slurp(filename) {
     return fs.existsSync(filename) ? String(fs.readFileSync(filename)).trim() : "";
 }
 
-var tests;
+const pathToTests = (fs.existsSync("tests") ? "tests" : "../../tests");
 
+const isHarmonyMode = process.argv[2] === "es6";
+const NODE = process.argv[0];
+const NODE_FLAG = (process.argv[2] === "es5" ? "" : "--harmony");
+const DEFS_FLAG = (isHarmonyMode ? "--harmony" : "");
+
+var tests;
 if( commandVariables.file && typeof commandVariables.file === "string" ) {
 	tests = [
 		commandVariables.file
@@ -29,7 +35,9 @@ if( commandVariables.file && typeof commandVariables.file === "string" ) {
 }
 else {
 	tests = fs.readdirSync("tests").filter(function(filename) {
-		return !/-out\.js$/.test(filename) && !/-stderr$/.test(filename);
+		return !/-out\.js$/.test(filename) && !/-stderr$/.test(filename)
+			&& (isHarmonyMode || filename.substr(0, 4) != "es6-")
+		;
 	});
 }
 
@@ -41,8 +49,14 @@ if( commandVariables.filter && typeof commandVariables.filter === "string" ) {
 }
 
 function stringCompare(str1, str2, compareType, removeLines) {
-	str1 = str1.replace(/\n\r/g, "\n").replace(/\r\n/g, "\n").replace(/\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
-	str2 = str2.replace(/\n\r/g, "\n").replace(/\r\n/g, "\n").replace(/\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
+	str1 = str1
+		.replace(/((\r\n)|\r|\n)/g, "\n")// Windows/Unix, Unicode/ASCII and IDE line break
+		.replace(/\t/g, "    ")// IDE settings
+	;
+	str2 = str2
+		.replace(/((\r\n)|\r|\n)/g, "\n")// Windows/Unix, Unicode/ASCII and IDE line break
+		.replace(/\t/g, "    ")// IDE settings
+	;
 
 	const compareFunction = compareType === "lines" ? ansidiff.lines : ansidiff.chars;
 
@@ -69,6 +83,8 @@ function stringCompare(str1, str2, compareType, removeLines) {
     return equal === true || result;
 }
 
+var test;
+
 function run() {
 	var test;
 
@@ -77,12 +93,11 @@ function run() {
 
 
     const noSuffix = test.slice(0, -3);
-    exec(fmt("node --harmony defs-wrapper tests/{0}", test), function(error, stdout, stderr) {
-
+    exec(fmt("{0} {1} defs-wrapper {2}/{3} {4}", NODE, NODE_FLAG, pathToTests, test, DEFS_FLAG), function(error, stdout, stderr) {
         stderr = (stderr || "").trim();
         stdout = (stdout || "").trim();
-        const expectedStderr = slurp(fmt("tests/{0}-stderr", noSuffix));
-        const expectedStdout = slurp(fmt("tests/{0}-out.js", noSuffix));
+        const expectedStderr = slurp(fmt("{0}/{1}-stderr", pathToTests, noSuffix));
+        const expectedStdout = slurp(fmt("{0}/{1}-out.js", pathToTests, noSuffix));
 
 		const compare1 = stringCompare(expectedStderr, stderr, "lines");
 		const compare2 = stringCompare(expectedStdout, stdout, "lines", true);
@@ -105,5 +120,4 @@ function run() {
         run();//next test
     });
 }
-
 run();//next test
